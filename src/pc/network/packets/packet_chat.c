@@ -36,6 +36,7 @@ static bool in_delayed(uint64_t hash) {
 }
 
 bool found_match(char* text) {
+    #ifdef GAMER
     uint64_t hash = 0;
     char* t = text;
     bool in_word = false;
@@ -58,7 +59,7 @@ bool found_match(char* text) {
     if (hash) {
         if (in_delayed(hash)) { return true; }
     }
-
+    #endif
     return false;
 }
 

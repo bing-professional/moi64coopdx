@@ -27,6 +27,12 @@ DEVELOPMENT ?= 0
 # Only enable this if you know exactly why you need it and will take measures to mitigate the risks.
 LUA_UNSAFE ?= 0
 
+# Enable desktop browser surfaces
+ENABLE_BROWSER ?= 0
+
+# Copy the Debug CEF runtime instead of Release when browser support is enabled.
+DEBUG_BROWSER ?= 0
+
 # Build for the N64 (turn this off for ports)
 TARGET_N64 = 0
 
@@ -472,7 +478,7 @@ SRC_DIRS := src src/engine src/game src/audio src/menu src/buffers actors levels
 BIN_DIRS := bin bin/$(VERSION)
 
 # PC files
-SRC_DIRS += src/pc src/pc/gfx src/pc/audio src/pc/controller src/pc/fs src/pc/fs/packtypes src/pc/mods src/pc/dev src/pc/network src/pc/network/packets src/pc/network/socket src/pc/network/coopnet src/pc/utils src/pc/utils/miniz src/pc/djui src/pc/lua src/pc/lua/utils src/pc/os
+SRC_DIRS += src/pc src/pc/gfx src/pc/audio src/pc/browser src/pc/controller src/pc/fs src/pc/fs/packtypes src/pc/mods src/pc/dev src/pc/network src/pc/network/packets src/pc/network/socket src/pc/network/coopnet src/pc/utils src/pc/utils/miniz src/pc/djui src/pc/lua src/pc/lua/utils src/pc/os
 
 ifeq ($(DISCORD_SDK),1)
   SRC_DIRS += src/pc/discord
@@ -550,6 +556,7 @@ GODDARD_O_FILES := $(foreach file,$(GODDARD_C_FILES),$(BUILD_DIR)/$(file:.c=.o))
 
 RPC_LIBS :=
 DISCORD_SDK_LIBS :=
+CEF_BUILD_FILES :=
 
 ifeq ($(DISCORD_SDK), 1)
   ifeq ($(WINDOWS_BUILD),1)
@@ -570,6 +577,41 @@ ifeq ($(DISCORD_SDK), 1)
     endif
   else
     DISCORD_SDK_LIBS := lib/discordsdk/libdiscord_game_sdk.so
+  endif
+endif
+
+CEF_ROOT := lib/cef/win64
+CEF_BRIDGE_DIR := $(CEF_ROOT)/bridge
+CEF_RESOURCES_DIR := $(CEF_ROOT)/Resources
+CEF_RUNTIME_DIR := tools/browser_backend_cef/runtime
+CEF_INSTALL_DIR := $(BUILD_DIR)/cef_resources
+CEF_BINARY_CONFIG := Release
+ifeq ($(DEBUG_BROWSER),1)
+  CEF_BINARY_CONFIG := Debug
+endif
+CEF_BINARY_DIR := $(CEF_ROOT)/$(CEF_BINARY_CONFIG)
+
+ifeq ($(ENABLE_BROWSER),1)
+  ifeq ($(WINDOWS_BUILD),1)
+    ifeq ($(TARGET_BITS),64)
+      CEF_BINARY_SRC_FILES := $(wildcard $(CEF_BINARY_DIR)/*)
+      CEF_RESOURCE_SRC_FILES := $(filter-out $(CEF_RESOURCES_DIR)/locales,$(wildcard $(CEF_RESOURCES_DIR)/*))
+      CEF_LOCALE_SRC_FILES := $(wildcard $(CEF_RESOURCES_DIR)/locales/*)
+      CEF_BRIDGE_SRC_FILES := $(wildcard $(CEF_BRIDGE_DIR)/browser_backend_cef.dll $(CEF_BRIDGE_DIR)/browser_subprocess.dll)
+      CEF_RUNTIME_SRC_FILES := $(wildcard $(CEF_RUNTIME_DIR)/crash_reporter.cfg)
+      CEF_SUBPROCESS_BOOTSTRAP_SRC_FILES := $(wildcard $(CEF_BINARY_DIR)/bootstrap.exe)
+
+      CEF_BINARY_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BINARY_SRC_FILES))
+      CEF_RESOURCE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RESOURCE_SRC_FILES))
+      CEF_LOCALE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/locales/%,$(CEF_INSTALL_DIR)/locales/%,$(CEF_LOCALE_SRC_FILES))
+      CEF_BRIDGE_BUILD_FILES := $(patsubst $(CEF_BRIDGE_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BRIDGE_SRC_FILES))
+      CEF_RUNTIME_BUILD_FILES := $(patsubst $(CEF_RUNTIME_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RUNTIME_SRC_FILES))
+      CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/bootstrap.exe,$(CEF_INSTALL_DIR)/browser_subprocess.exe,$(CEF_SUBPROCESS_BOOTSTRAP_SRC_FILES))
+
+      CEF_BUILD_FILES := $(CEF_BINARY_BUILD_FILES) $(CEF_RESOURCE_BUILD_FILES) $(CEF_LOCALE_BUILD_FILES) $(CEF_BRIDGE_BUILD_FILES) $(CEF_RUNTIME_BUILD_FILES) $(CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES)
+    else
+      $(warning ENABLE_BROWSER currently expects the Windows x64 CEF SDK under $(CEF_ROOT))
+    endif
   endif
 endif
 
@@ -1031,6 +1073,9 @@ ifeq ($(LUA_UNSAFE),1)
   endif
 endif
 
+CC_CHECK_CFLAGS += -DENABLE_BROWSER=$(ENABLE_BROWSER)
+CFLAGS += -DENABLE_BROWSER=$(ENABLE_BROWSER)
+
 # Check for rpi option
 ifeq ($(TARGET_RPI),1)
   CC_CHECK_CFLAGS += -DTARGET_RPI
@@ -1163,6 +1208,32 @@ $(BUILD_DIR)/$(RPC_LIBS):
 
 $(BUILD_DIR)/$(DISCORD_SDK_LIBS):
 	@$(CP) -f $(DISCORD_SDK_LIBS) $(BUILD_DIR)
+
+ifneq ($(strip $(CEF_BUILD_FILES)),)
+$(CEF_BINARY_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_BINARY_DIR)/%
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+
+$(CEF_BRIDGE_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_BRIDGE_DIR)/%
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+
+$(CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES): $(CEF_BINARY_DIR)/bootstrap.exe
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+
+$(CEF_RUNTIME_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_RUNTIME_DIR)/%
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+
+$(CEF_RESOURCE_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_RESOURCES_DIR)/%
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+
+$(CEF_LOCALE_BUILD_FILES): $(CEF_INSTALL_DIR)/locales/%: $(CEF_RESOURCES_DIR)/locales/%
+	@mkdir -p $(dir $@)
+	@$(CP) -f $< $@
+endif
 
 $(BUILD_DIR)/$(COOPNET_LIBS):
 	@$(CP) -f $(COOPNET_LIBS) $(BUILD_DIR)
@@ -1518,7 +1589,7 @@ ifeq ($(TARGET_N64),1)
   $(BUILD_DIR)/$(TARGET).objdump: $(ELF)
 	$(OBJDUMP) -D $< > $@
 else
-  $(EXE): $(O_FILES) $(MIO0_FILES:.mio0=.o) $(ULTRA_O_FILES) $(GODDARD_O_FILES) $(BUILD_DIR)/$(RPC_LIBS) $(BUILD_DIR)/$(DISCORD_SDK_LIBS) $(BUILD_DIR)/$(COOPNET_LIBS) $(BUILD_DIR)/$(UPDATER_EXEC) $(BUILD_DIR)/$(LANG_DIR) $(BUILD_DIR)/$(MOD_DIR) $(BUILD_DIR)/$(PALETTES_DIR)
+  $(EXE): $(O_FILES) $(MIO0_FILES:.mio0=.o) $(ULTRA_O_FILES) $(GODDARD_O_FILES) $(BUILD_DIR)/$(RPC_LIBS) $(BUILD_DIR)/$(DISCORD_SDK_LIBS) $(BUILD_DIR)/$(COOPNET_LIBS) $(BUILD_DIR)/$(UPDATER_EXEC) $(BUILD_DIR)/$(LANG_DIR) $(BUILD_DIR)/$(MOD_DIR) $(BUILD_DIR)/$(PALETTES_DIR) $(CEF_BUILD_FILES)
 	@$(PRINT) "$(GREEN)Linking executable: $(BLUE)$@ $(NO_COL)\n"
 	$(V)$(LD) $(PROF_FLAGS) -L $(BUILD_DIR) -o $@ $(O_FILES) $(ULTRA_O_FILES) $(GODDARD_O_FILES) $(LDFLAGS)
 endif

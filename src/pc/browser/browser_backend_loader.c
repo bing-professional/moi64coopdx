@@ -1,4 +1,4 @@
-#if defined(_WIN32) && defined(ENABLE_BROWSER) && ENABLE_BROWSER
+#if defined(ENABLE_BROWSER) && ENABLE_BROWSER && (defined(_WIN32) || defined(__linux__))
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -6,21 +6,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#include <limits.h>
+#include <unistd.h>
+#endif
 
 #include "browser_backend.h"
 #include "browser_backend_api.h"
 
 #include "pc/debuglog.h"
 
-#define BROWSER_BACKEND_DLL_NAME "browser_backend_cef.dll"
+#if defined(_WIN32)
+#define BROWSER_BACKEND_MODULE_NAME "browser_backend_cef.dll"
+#define BROWSER_PATH_SEPARATOR '\\'
+typedef HMODULE BrowserBackendModuleHandle;
+#else
+#define BROWSER_BACKEND_MODULE_NAME "browser_backend_cef.so"
+#define BROWSER_PATH_SEPARATOR '/'
+typedef void *BrowserBackendModuleHandle;
+#endif
+
 #define BROWSER_BACKEND_RUNTIME_DIR "cef_resources"
 
 struct BrowserBackendBrowser {
     void *handle;
 };
 
-static HMODULE sBrowserBackendModule = NULL;
+static BrowserBackendModuleHandle sBrowserBackendModule = NULL;
 static const struct BrowserBackendApi *sBrowserBackendApi = NULL;
 static bool sBrowserBackendInited = false;
 static bool sBrowserBackendAvailable = false;
@@ -70,57 +85,123 @@ static void browser_backend_fill_api_surface(struct BrowserBackendApiSurface *ds
     dst->surfaceHeight = src->surfaceHeight;
 }
 
+static bool browser_backend_get_executable_directory(char *buffer, size_t bufferSize) {
+    if (buffer == NULL || bufferSize == 0) {
+        return false;
+    }
+
+#if defined(_WIN32)
+    DWORD written = GetModuleFileNameA(NULL, buffer, (DWORD) bufferSize);
+    if (written == 0 || written >= (DWORD) bufferSize) {
+        buffer[0] = '\0';
+        return false;
+    }
+#else
+    ssize_t written = readlink("/proc/self/exe", buffer, bufferSize - 1);
+    if (written < 0 || (size_t) written >= bufferSize) {
+        buffer[0] = '\0';
+        return false;
+    }
+    buffer[written] = '\0';
+#endif
+
+    char *lastSlash = strrchr(buffer, BROWSER_PATH_SEPARATOR);
+    if (lastSlash == NULL) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    *lastSlash = '\0';
+    return true;
+}
+
+static void *browser_backend_lookup_symbol(BrowserBackendModuleHandle module, const char *name) {
+#if defined(_WIN32)
+    return module != NULL ? (void *) GetProcAddress(module, name) : NULL;
+#else
+    return module != NULL ? dlsym(module, name) : NULL;
+#endif
+}
+
 static void browser_backend_unload_module(void) {
     sBrowserBackendApi = NULL;
     if (sBrowserBackendModule != NULL) {
+#if defined(_WIN32)
         FreeLibrary(sBrowserBackendModule);
+#else
+        dlclose(sBrowserBackendModule);
+#endif
         sBrowserBackendModule = NULL;
     }
 }
 
+static void browser_backend_try_load_from_path(const char *path) {
+    if (path == NULL || path[0] == '\0' || sBrowserBackendModule != NULL) {
+        return;
+    }
+
+#if defined(_WIN32)
+    sBrowserBackendModule = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+#else
+    sBrowserBackendModule = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
 static bool browser_backend_load_module(void) {
-    char exePath[MAX_PATH] = { 0 };
+#if defined(_WIN32)
     char exeDir[MAX_PATH] = { 0 };
-    char dllPath[MAX_PATH] = { 0 };
-    char *lastSlash = NULL;
+    char modulePath[MAX_PATH] = { 0 };
+#else
+    char exeDir[PATH_MAX] = { 0 };
+    char modulePath[PATH_MAX] = { 0 };
+#endif
 
-    if (GetModuleFileNameA(NULL, exePath, (DWORD) sizeof(exePath)) == 0) {
-        exePath[0] = '\0';
-    }
-
-    lastSlash = strrchr(exePath, '\\');
-    if (lastSlash != NULL) {
-        *lastSlash = '\0';
-        snprintf(exeDir, sizeof(exeDir), "%s", exePath);
-
-        if (snprintf(dllPath, sizeof(dllPath), "%s\\%s\\%s", exeDir, BROWSER_BACKEND_RUNTIME_DIR, BROWSER_BACKEND_DLL_NAME) >= 0) {
-            sBrowserBackendModule = LoadLibraryExA(dllPath, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (browser_backend_get_executable_directory(exeDir, sizeof(exeDir))) {
+        if (snprintf(modulePath,
+                     sizeof(modulePath),
+                     "%s%c%s%c%s",
+                     exeDir,
+                     BROWSER_PATH_SEPARATOR,
+                     BROWSER_BACKEND_RUNTIME_DIR,
+                     BROWSER_PATH_SEPARATOR,
+                     BROWSER_BACKEND_MODULE_NAME) > 0) {
+            browser_backend_try_load_from_path(modulePath);
         }
 
-        if (sBrowserBackendModule == NULL && snprintf(dllPath, sizeof(dllPath), "%s\\%s", exeDir, BROWSER_BACKEND_DLL_NAME) >= 0) {
-            sBrowserBackendModule = LoadLibraryExA(dllPath, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (sBrowserBackendModule == NULL
+            && snprintf(modulePath,
+                        sizeof(modulePath),
+                        "%s%c%s",
+                        exeDir,
+                        BROWSER_PATH_SEPARATOR,
+                        BROWSER_BACKEND_MODULE_NAME) > 0) {
+            browser_backend_try_load_from_path(modulePath);
         }
     }
 
     if (sBrowserBackendModule == NULL) {
-        sBrowserBackendModule = LoadLibraryA(BROWSER_BACKEND_DLL_NAME);
+#if defined(_WIN32)
+        sBrowserBackendModule = LoadLibraryA(BROWSER_BACKEND_MODULE_NAME);
+#else
+        sBrowserBackendModule = dlopen(BROWSER_BACKEND_MODULE_NAME, RTLD_NOW | RTLD_LOCAL);
+#endif
     }
 
     if (sBrowserBackendModule == NULL) {
-        LOG_INFO("Browser backend bridge '%s' is not present. Browser APIs will stay unavailable.", BROWSER_BACKEND_DLL_NAME);
+        LOG_INFO("Browser backend bridge '%s' is not present. Browser APIs will stay unavailable.", BROWSER_BACKEND_MODULE_NAME);
         return false;
     }
 
-    BrowserBackendGetApiFn getApi = (BrowserBackendGetApiFn) GetProcAddress(sBrowserBackendModule, BROWSER_BACKEND_GET_API_NAME);
+    BrowserBackendGetApiFn getApi = (BrowserBackendGetApiFn) browser_backend_lookup_symbol(sBrowserBackendModule, BROWSER_BACKEND_GET_API_NAME);
     if (getApi == NULL) {
-        LOG_ERROR("Browser backend bridge '%s' does not export %s.", BROWSER_BACKEND_DLL_NAME, BROWSER_BACKEND_GET_API_NAME);
+        LOG_ERROR("Browser backend bridge '%s' does not export %s.", BROWSER_BACKEND_MODULE_NAME, BROWSER_BACKEND_GET_API_NAME);
         browser_backend_unload_module();
         return false;
     }
 
     sBrowserBackendApi = getApi(BROWSER_BACKEND_API_VERSION);
     if (sBrowserBackendApi == NULL || sBrowserBackendApi->apiVersion != BROWSER_BACKEND_API_VERSION) {
-        LOG_ERROR("Browser backend bridge '%s' returned an incompatible API table.", BROWSER_BACKEND_DLL_NAME);
+        LOG_ERROR("Browser backend bridge '%s' returned an incompatible API table.", BROWSER_BACKEND_MODULE_NAME);
         browser_backend_unload_module();
         return false;
     }
@@ -141,7 +222,7 @@ bool browser_backend_init(void) {
     }
 
     if (sBrowserBackendApi->init == NULL || sBrowserBackendApi->available == NULL) {
-        LOG_ERROR("Browser backend bridge '%s' is missing required entry points.", BROWSER_BACKEND_DLL_NAME);
+        LOG_ERROR("Browser backend bridge '%s' is missing required entry points.", BROWSER_BACKEND_MODULE_NAME);
         browser_backend_unload_module();
         return true;
     }
@@ -159,14 +240,14 @@ bool browser_backend_init(void) {
     };
 
     if (!sBrowserBackendApi->init(&callbacks)) {
-        LOG_ERROR("Browser backend bridge '%s' failed to initialize.", BROWSER_BACKEND_DLL_NAME);
+        LOG_ERROR("Browser backend bridge '%s' failed to initialize.", BROWSER_BACKEND_MODULE_NAME);
         browser_backend_unload_module();
         return true;
     }
 
     sBrowserBackendAvailable = sBrowserBackendApi->available() != 0;
     if (!sBrowserBackendAvailable) {
-        LOG_INFO("Browser backend bridge '%s' initialized but reported unavailable.", BROWSER_BACKEND_DLL_NAME);
+        LOG_INFO("Browser backend bridge '%s' initialized but reported unavailable.", BROWSER_BACKEND_MODULE_NAME);
     }
     return true;
 }

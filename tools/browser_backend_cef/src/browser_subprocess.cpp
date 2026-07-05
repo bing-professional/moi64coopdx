@@ -1,5 +1,8 @@
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <locale>
@@ -12,12 +15,15 @@
 
 #include "include/cef_app.h"
 #include "include/cef_parser.h"
-#include "include/cef_sandbox_win.h"
 #include "include/cef_process_message.h"
 #include "include/cef_render_process_handler.h"
 #include "include/cef_v8.h"
 #include "include/internal/cef_types.h"
 #include "include/wrapper/cef_helpers.h"
+
+#if defined(_WIN32)
+#include "include/cef_sandbox_win.h"
+#endif
 
 #include "browser_cef_messages.h"
 
@@ -478,7 +484,7 @@ void send_js_result(CefRefPtr<CefBrowser> browser,
 
 enum class MarshaledValueType {
     Null = 0,
-    Bool = 1,
+    Boolean = 1,
     Int = 2,
     Double = 3,
     String = 4,
@@ -504,7 +510,7 @@ CefRefPtr<CefListValue> marshal_v8_arguments(const CefV8ValueList& arguments) {
             arg->SetInt(0, static_cast<int>(MarshaledValueType::Null));
             arg->SetNull(1);
         } else if (value->IsBool()) {
-            arg->SetInt(0, static_cast<int>(MarshaledValueType::Bool));
+            arg->SetInt(0, static_cast<int>(MarshaledValueType::Boolean));
             arg->SetBool(1, value->GetBoolValue());
         } else if (value->IsInt()) {
             arg->SetInt(0, static_cast<int>(MarshaledValueType::Int));
@@ -884,16 +890,14 @@ private:
     std::unordered_map<int, int> browserRefCounts_;
 };
 
-int run_subprocess(HINSTANCE instance, void* sandbox_info, cef_version_info_t* version_info) {
-    static_cast<void>(version_info);
-
-    CefMainArgs mainArgs(instance);
+int run_subprocess(const CefMainArgs& mainArgs, void* sandbox_info) {
     CefRefPtr<BrowserSubprocessApp> app = new BrowserSubprocessApp();
     return CefExecuteProcess(mainArgs, app, sandbox_info);
 }
 
 } // namespace
 
+#if defined(_WIN32)
 extern "C" CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance,
                                                LPTSTR lpCmdLine,
                                                int nCmdShow,
@@ -901,7 +905,9 @@ extern "C" CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE hInstance,
                                                cef_version_info_t* version_info) {
     static_cast<void>(lpCmdLine);
     static_cast<void>(nCmdShow);
-    return run_subprocess(hInstance, sandbox_info, version_info);
+    static_cast<void>(version_info);
+    CefMainArgs mainArgs(hInstance);
+    return run_subprocess(mainArgs, sandbox_info);
 }
 
 extern "C" CEF_BOOTSTRAP_EXPORT int RunConsoleMain(int argc,
@@ -910,5 +916,13 @@ extern "C" CEF_BOOTSTRAP_EXPORT int RunConsoleMain(int argc,
                                                    cef_version_info_t* version_info) {
     static_cast<void>(argc);
     static_cast<void>(argv);
-    return run_subprocess(GetModuleHandleW(nullptr), sandbox_info, version_info);
+    static_cast<void>(version_info);
+    CefMainArgs mainArgs(GetModuleHandleW(nullptr));
+    return run_subprocess(mainArgs, sandbox_info);
 }
+#else
+int main(int argc, char* argv[]) {
+    CefMainArgs mainArgs(argc, argv);
+    return run_subprocess(mainArgs, nullptr);
+}
+#endif

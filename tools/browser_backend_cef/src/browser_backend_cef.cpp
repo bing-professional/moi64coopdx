@@ -1,17 +1,27 @@
+#if defined(_WIN32)
 #include <windows.h>
 #include <objbase.h>
+#else
+#include <X11/Xlib.h>
+#include <cerrno>
+#include <csignal>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cwctype>
 #include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -31,7 +41,9 @@
 #include "include/cef_stream.h"
 #include "include/cef_version_info.h"
 #include "include/internal/cef_types.h"
+#if defined(_WIN32)
 #include "include/internal/cef_win.h"
+#endif
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_stream_resource_handler.h"
 
@@ -41,28 +53,50 @@
 
 namespace {
 
+#if defined(_WIN32)
+using BrowserProcessId = DWORD;
+#define BROWSER_BACKEND_EXPORT __declspec(dllexport)
+#else
+using BrowserProcessId = uint32_t;
+#define BROWSER_BACKEND_EXPORT __attribute__((visibility("default")))
+#endif
+
 struct BrowserBridgeState {
     BrowserBackendApiCallbacks callbacks{};
     bool initialized = false;
     bool cefInitialized = false;
+#if defined(_WIN32)
     bool comInitialized = false;
+#endif
     bool shuttingDown = false;
     int openBrowsers = 0;
-    CefRefPtr<class BrowserProcessApp> app;
+    CefRefPtr<CefApp> app;
     std::filesystem::path cachePath;
+#if defined(__linux__)
+    std::vector<std::string> mainArgStorage;
+    std::vector<char*> mainArgv;
+#endif
 };
 
 BrowserBridgeState gState;
-std::wstring gInitTracePath;
+std::filesystem::path gInitTracePath;
 
-constexpr wchar_t kBrowserCacheRootDirName[] = L"browser_cache";
-constexpr wchar_t kBrowserCacheInstancePrefix[] = L"instance-";
-constexpr wchar_t kBrowserLogPrefix[] = L"browser_cef-";
-constexpr wchar_t kBrowserLogSuffix[] = L".log";
-constexpr wchar_t kBrowserInitTracePrefix[] = L"browser_cef_init_trace-";
-constexpr wchar_t kBrowserInitTraceSuffix[] = L".txt";
+constexpr char kBrowserCacheRootDirName[] = "browser_cache";
+constexpr char kBrowserCacheInstancePrefix[] = "instance-";
+constexpr char kBrowserLogPrefix[] = "browser_cef-";
+constexpr char kBrowserLogSuffix[] = ".log";
+constexpr char kBrowserInitTracePrefix[] = "browser_cef_init_trace-";
+constexpr char kBrowserInitTraceSuffix[] = ".txt";
+constexpr char kBrowserRuntimeDirName[] = "cef_resources";
+constexpr char kBrowserLocalesDirName[] = "locales";
+#if defined(_WIN32)
+constexpr char kBrowserSubprocessName[] = "browser_subprocess.exe";
+#else
+constexpr char kBrowserSubprocessName[] = "browser_subprocess";
+#endif
 
 std::string path_to_utf8(const std::filesystem::path& path);
+std::filesystem::path path_from_utf8(const std::string& path);
 void append_init_trace(const std::filesystem::path& tracePath, const char* format, ...);
 
 class BrowserSession;
@@ -94,6 +128,7 @@ private:
     std::vector<CefRefPtr<BrowserSession>> sessions_;
 };
 
+#if defined(_WIN32)
 std::wstring utf8_to_wide(const std::string& value) {
     if (value.empty()) {
         return std::wstring();
@@ -130,8 +165,10 @@ std::string wide_to_utf8(const std::wstring& value) {
     result.resize(static_cast<size_t>(length - 1));
     return result;
 }
+#endif
 
-std::filesystem::path get_executable_directory() {
+std::filesystem::path get_executable_path() {
+#if defined(_WIN32)
     std::wstring buffer(MAX_PATH, L'\0');
 
     for (;;) {
@@ -142,71 +179,99 @@ std::filesystem::path get_executable_directory() {
 
         if (written < buffer.size() - 1) {
             buffer.resize(written);
-            return std::filesystem::path(buffer).parent_path();
+            return std::filesystem::path(buffer);
         }
 
         buffer.resize(buffer.size() * 2);
     }
+#else
+    std::vector<char> buffer(4096, '\0');
+    for (;;) {
+        ssize_t written = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+        if (written < 0) {
+            return std::filesystem::current_path();
+        }
+
+        if (static_cast<size_t>(written) < buffer.size() - 1) {
+            buffer[static_cast<size_t>(written)] = '\0';
+            return std::filesystem::path(buffer.data());
+        }
+
+        buffer.resize(buffer.size() * 2);
+    }
+#endif
+}
+
+std::filesystem::path get_executable_directory() {
+    return get_executable_path().parent_path();
 }
 
 std::filesystem::path get_cef_runtime_directory(const std::filesystem::path& executableDirectory) {
     std::error_code ec;
-    std::filesystem::path runtimeDirectory = executableDirectory / L"cef_resources";
+    std::filesystem::path runtimeDirectory = executableDirectory / kBrowserRuntimeDirName;
     if (std::filesystem::exists(runtimeDirectory, ec) && !ec) {
         return runtimeDirectory;
     }
     return executableDirectory;
 }
 
-std::wstring get_process_id_text(DWORD processId) {
-    return std::to_wstring(processId);
+std::string get_process_id_text(BrowserProcessId processId) {
+    return std::to_string(processId);
+}
+
+BrowserProcessId get_current_process_id() {
+#if defined(_WIN32)
+    return GetCurrentProcessId();
+#else
+    return static_cast<BrowserProcessId>(getpid());
+#endif
 }
 
 std::filesystem::path get_browser_cache_root_path(const std::filesystem::path& executableDirectory) {
     return executableDirectory / kBrowserCacheRootDirName;
 }
 
-std::filesystem::path get_browser_cache_path(const std::filesystem::path& executableDirectory, DWORD processId) {
+std::filesystem::path get_browser_cache_path(const std::filesystem::path& executableDirectory, BrowserProcessId processId) {
     return get_browser_cache_root_path(executableDirectory)
-        / (std::wstring(kBrowserCacheInstancePrefix) + get_process_id_text(processId));
+        / (std::string(kBrowserCacheInstancePrefix) + get_process_id_text(processId));
 }
 
-std::filesystem::path get_browser_log_path(const std::filesystem::path& executableDirectory, DWORD processId) {
-    return executableDirectory / (std::wstring(kBrowserLogPrefix) + get_process_id_text(processId) + kBrowserLogSuffix);
+std::filesystem::path get_browser_log_path(const std::filesystem::path& executableDirectory, BrowserProcessId processId) {
+    return executableDirectory / (std::string(kBrowserLogPrefix) + get_process_id_text(processId) + kBrowserLogSuffix);
 }
 
-std::filesystem::path get_browser_init_trace_path(const std::filesystem::path& executableDirectory, DWORD processId) {
-    return executableDirectory / (std::wstring(kBrowserInitTracePrefix) + get_process_id_text(processId) + kBrowserInitTraceSuffix);
+std::filesystem::path get_browser_init_trace_path(const std::filesystem::path& executableDirectory, BrowserProcessId processId) {
+    return executableDirectory / (std::string(kBrowserInitTracePrefix) + get_process_id_text(processId) + kBrowserInitTraceSuffix);
 }
 
-bool try_parse_process_id(const std::wstring& text, DWORD& outProcessId) {
+bool try_parse_process_id(const std::string& text, BrowserProcessId& outProcessId) {
     if (text.empty()) {
         return false;
     }
 
     uint64_t value = 0;
-    for (wchar_t ch : text) {
-        if (ch < L'0' || ch > L'9') {
+    for (char ch : text) {
+        if (ch < '0' || ch > '9') {
             return false;
         }
 
-        value = (value * 10u) + static_cast<uint64_t>(ch - L'0');
-        if (value > std::numeric_limits<DWORD>::max()) {
+        value = (value * 10u) + static_cast<uint64_t>(ch - '0');
+        if (value > std::numeric_limits<BrowserProcessId>::max()) {
             return false;
         }
     }
 
-    outProcessId = static_cast<DWORD>(value);
+    outProcessId = static_cast<BrowserProcessId>(value);
     return outProcessId != 0;
 }
 
 bool try_extract_process_id_from_named_artifact(const std::filesystem::path& artifactPath,
-                                                const wchar_t* prefix,
-                                                const wchar_t* suffix,
-                                                DWORD& outProcessId) {
-    const std::wstring fileName = artifactPath.filename().wstring();
-    const std::wstring prefixText = prefix != nullptr ? prefix : L"";
-    const std::wstring suffixText = suffix != nullptr ? suffix : L"";
+                                                const char* prefix,
+                                                const char* suffix,
+                                                BrowserProcessId& outProcessId) {
+    const std::string fileName = artifactPath.filename().string();
+    const std::string prefixText = prefix != nullptr ? prefix : "";
+    const std::string suffixText = suffix != nullptr ? suffix : "";
 
     if (fileName.size() <= (prefixText.size() + suffixText.size())) {
         return false;
@@ -220,17 +285,18 @@ bool try_extract_process_id_from_named_artifact(const std::filesystem::path& art
         return false;
     }
 
-    const std::wstring processIdText = fileName.substr(
+    const std::string processIdText = fileName.substr(
         prefixText.size(),
         fileName.size() - prefixText.size() - suffixText.size());
     return try_parse_process_id(processIdText, outProcessId);
 }
 
-bool is_process_running(DWORD processId) {
+bool is_process_running(BrowserProcessId processId) {
     if (processId == 0) {
         return false;
     }
 
+#if defined(_WIN32)
     HANDLE processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (processHandle == nullptr) {
         return GetLastError() != ERROR_INVALID_PARAMETER;
@@ -239,14 +305,18 @@ bool is_process_running(DWORD processId) {
     DWORD waitResult = WaitForSingleObject(processHandle, 0);
     CloseHandle(processHandle);
     return waitResult != WAIT_OBJECT_0;
+#else
+    int result = kill(static_cast<pid_t>(processId), 0);
+    return result == 0 || errno == EPERM;
+#endif
 }
 
 void cleanup_stale_pid_files(const std::filesystem::path& directory,
                              const std::filesystem::path& tracePath,
-                             DWORD currentProcessId,
-                             const wchar_t* prefix,
-                             const wchar_t* suffix) {
-    std::vector<std::pair<std::filesystem::path, DWORD>> staleFiles;
+                             BrowserProcessId currentProcessId,
+                             const char* prefix,
+                             const char* suffix) {
+    std::vector<std::pair<std::filesystem::path, BrowserProcessId>> staleFiles;
     std::error_code iteratorError;
     std::filesystem::directory_iterator iterator(directory, iteratorError);
     if (iteratorError) {
@@ -263,7 +333,7 @@ void cleanup_stale_pid_files(const std::filesystem::path& directory,
             continue;
         }
 
-        DWORD processId = 0;
+        BrowserProcessId processId = 0;
         if (!try_extract_process_id_from_named_artifact(iterator->path(), prefix, suffix, processId)) {
             continue;
         }
@@ -278,13 +348,13 @@ void cleanup_stale_pid_files(const std::filesystem::path& directory,
     for (const auto& [filePath, processId] : staleFiles) {
         std::error_code removeError;
         if (std::filesystem::remove(filePath, removeError)) {
-            append_init_trace(tracePath, "cleanup: removed stale file %s pid=%lu", path_to_utf8(filePath).c_str(), processId);
+            append_init_trace(tracePath, "cleanup: removed stale file %s pid=%u", path_to_utf8(filePath).c_str(), static_cast<unsigned int>(processId));
         } else if (removeError) {
             append_init_trace(
                 tracePath,
-                "cleanup: failed to remove stale file %s pid=%lu error=%d",
+                "cleanup: failed to remove stale file %s pid=%u error=%d",
                 path_to_utf8(filePath).c_str(),
-                processId,
+                static_cast<unsigned int>(processId),
                 removeError.value());
         }
     }
@@ -292,8 +362,8 @@ void cleanup_stale_pid_files(const std::filesystem::path& directory,
 
 void cleanup_stale_cache_instances(const std::filesystem::path& cacheRootPath,
                                    const std::filesystem::path& tracePath,
-                                   DWORD currentProcessId) {
-    std::vector<std::pair<std::filesystem::path, DWORD>> staleDirectories;
+                                   BrowserProcessId currentProcessId) {
+    std::vector<std::pair<std::filesystem::path, BrowserProcessId>> staleDirectories;
     std::error_code iteratorError;
     std::filesystem::directory_iterator iterator(cacheRootPath, iteratorError);
     if (iteratorError) {
@@ -310,8 +380,8 @@ void cleanup_stale_cache_instances(const std::filesystem::path& cacheRootPath,
             continue;
         }
 
-        DWORD processId = 0;
-        if (!try_extract_process_id_from_named_artifact(iterator->path(), kBrowserCacheInstancePrefix, L"", processId)) {
+        BrowserProcessId processId = 0;
+        if (!try_extract_process_id_from_named_artifact(iterator->path(), kBrowserCacheInstancePrefix, "", processId)) {
             continue;
         }
 
@@ -328,16 +398,16 @@ void cleanup_stale_cache_instances(const std::filesystem::path& cacheRootPath,
         if (!removeError) {
             append_init_trace(
                 tracePath,
-                "cleanup: removed stale cache %s pid=%lu entries=%llu",
+                "cleanup: removed stale cache %s pid=%u entries=%llu",
                 path_to_utf8(directoryPath).c_str(),
-                processId,
+                static_cast<unsigned int>(processId),
                 static_cast<unsigned long long>(removedCount));
         } else {
             append_init_trace(
                 tracePath,
-                "cleanup: failed to remove stale cache %s pid=%lu error=%d",
+                "cleanup: failed to remove stale cache %s pid=%u error=%d",
                 path_to_utf8(directoryPath).c_str(),
-                processId,
+                static_cast<unsigned int>(processId),
                 removeError.value());
         }
     }
@@ -345,46 +415,109 @@ void cleanup_stale_cache_instances(const std::filesystem::path& cacheRootPath,
 
 void cleanup_stale_runtime_artifacts(const std::filesystem::path& executableDirectory,
                                      const std::filesystem::path& tracePath,
-                                     DWORD currentProcessId) {
+                                     BrowserProcessId currentProcessId) {
     const std::filesystem::path cacheRootPath = get_browser_cache_root_path(executableDirectory);
     cleanup_stale_cache_instances(cacheRootPath, tracePath, currentProcessId);
     cleanup_stale_pid_files(executableDirectory, tracePath, currentProcessId, kBrowserLogPrefix, kBrowserLogSuffix);
     cleanup_stale_pid_files(executableDirectory, tracePath, currentProcessId, kBrowserInitTracePrefix, kBrowserInitTraceSuffix);
 }
 
-std::filesystem::path get_module_path(HMODULE module) {
-    if (module == nullptr) {
-        return std::filesystem::path();
-    }
-
-    std::wstring buffer(MAX_PATH, L'\0');
-
-    for (;;) {
-        DWORD written = GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
-        if (written == 0) {
-            return std::filesystem::path();
-        }
-
-        if (written < buffer.size() - 1) {
-            buffer.resize(written);
-            return std::filesystem::path(buffer);
-        }
-
-        buffer.resize(buffer.size() * 2);
-    }
-}
-
 CefString path_to_cef_string(const std::filesystem::path& path) {
+#if defined(_WIN32)
     return CefString(path.wstring());
+#else
+    return CefString(path.string());
+#endif
 }
 
 std::string path_to_utf8(const std::filesystem::path& path) {
+#if defined(_WIN32)
     return wide_to_utf8(path.wstring());
+#else
+    return path.string();
+#endif
 }
+
+std::filesystem::path path_from_utf8(const std::string& path) {
+#if defined(_WIN32)
+    return std::filesystem::path(utf8_to_wide(path));
+#else
+    return std::filesystem::path(path);
+#endif
+}
+
+void set_cef_path(cef_string_t* target, const std::filesystem::path& path) {
+    if (target == nullptr) {
+        return;
+    }
+
+#if defined(_WIN32)
+    CefString(target).FromWString(path.wstring());
+#else
+    CefString(target).FromString(path.string());
+#endif
+}
+
+void sleep_millis(unsigned int millis) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(millis));
+}
+
+#if defined(__linux__)
+int browser_x11_error_handler(Display* display, XErrorEvent* event) {
+    static_cast<void>(display);
+    static_cast<void>(event);
+    return 0;
+}
+
+int browser_x11_io_error_handler(Display* display) {
+    static_cast<void>(display);
+    return 0;
+}
+
+bool capture_main_args(std::vector<std::string>& storage, std::vector<char*>& argv) {
+    storage.clear();
+    argv.clear();
+
+    FILE* file = std::fopen("/proc/self/cmdline", "rb");
+    if (file != nullptr) {
+        std::vector<char> raw;
+        char chunk[512];
+        size_t bytesRead = 0;
+        while ((bytesRead = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+            raw.insert(raw.end(), chunk, chunk + bytesRead);
+        }
+        std::fclose(file);
+
+        size_t start = 0;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '\0') {
+                if (i > start) {
+                    storage.emplace_back(raw.data() + start, i - start);
+                }
+                start = i + 1;
+            }
+        }
+        if (start < raw.size()) {
+            storage.emplace_back(raw.data() + start, raw.size() - start);
+        }
+    }
+
+    if (storage.empty()) {
+        storage.push_back(path_to_utf8(get_executable_path()));
+    }
+
+    argv.reserve(storage.size() + 1);
+    for (std::string& entry : storage) {
+        argv.push_back(entry.data());
+    }
+    argv.push_back(nullptr);
+    return !storage.empty();
+}
+#endif
 
 void append_init_trace(const std::filesystem::path& tracePath, const char* format, ...) {
 #ifdef _DEBUG
-    FILE* file = _wfopen(tracePath.c_str(), L"a");
+    FILE* file = std::fopen(path_to_utf8(tracePath).c_str(), "a");
     if (file == nullptr) {
         return;
     }
@@ -438,35 +571,37 @@ bool resolve_url_to_path(int32_t browserId, const std::string& url, std::filesys
         return false;
     }
 
-    outPath = std::filesystem::path(utf8_to_wide(pathBuffer));
+    outPath = path_from_utf8(pathBuffer);
     return true;
 }
 
 std::string get_mime_type(const std::filesystem::path& path) {
-    std::wstring extensionWide = path.extension().wstring();
-    std::transform(extensionWide.begin(), extensionWide.end(), extensionWide.begin(), ::towlower);
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
 
-    if (extensionWide == L".html" || extensionWide == L".htm") return "text/html";
-    if (extensionWide == L".css") return "text/css";
-    if (extensionWide == L".js" || extensionWide == L".mjs") return "text/javascript";
-    if (extensionWide == L".json") return "application/json";
-    if (extensionWide == L".txt" || extensionWide == L".log") return "text/plain";
-    if (extensionWide == L".xml") return "application/xml";
-    if (extensionWide == L".svg") return "image/svg+xml";
-    if (extensionWide == L".png") return "image/png";
-    if (extensionWide == L".jpg" || extensionWide == L".jpeg") return "image/jpeg";
-    if (extensionWide == L".gif") return "image/gif";
-    if (extensionWide == L".webp") return "image/webp";
-    if (extensionWide == L".ico") return "image/x-icon";
-    if (extensionWide == L".woff") return "font/woff";
-    if (extensionWide == L".woff2") return "font/woff2";
-    if (extensionWide == L".ttf") return "font/ttf";
-    if (extensionWide == L".otf") return "font/otf";
-    if (extensionWide == L".mp3") return "audio/mpeg";
-    if (extensionWide == L".ogg") return "audio/ogg";
-    if (extensionWide == L".wav") return "audio/wav";
-    if (extensionWide == L".mp4") return "video/mp4";
-    if (extensionWide == L".webm") return "video/webm";
+    if (extension == ".html" || extension == ".htm") return "text/html";
+    if (extension == ".css") return "text/css";
+    if (extension == ".js" || extension == ".mjs") return "text/javascript";
+    if (extension == ".json") return "application/json";
+    if (extension == ".txt" || extension == ".log") return "text/plain";
+    if (extension == ".xml") return "application/xml";
+    if (extension == ".svg") return "image/svg+xml";
+    if (extension == ".png") return "image/png";
+    if (extension == ".jpg" || extension == ".jpeg") return "image/jpeg";
+    if (extension == ".gif") return "image/gif";
+    if (extension == ".webp") return "image/webp";
+    if (extension == ".ico") return "image/x-icon";
+    if (extension == ".woff") return "font/woff";
+    if (extension == ".woff2") return "font/woff2";
+    if (extension == ".ttf") return "font/ttf";
+    if (extension == ".otf") return "font/otf";
+    if (extension == ".mp3") return "audio/mpeg";
+    if (extension == ".ogg") return "audio/ogg";
+    if (extension == ".wav") return "audio/wav";
+    if (extension == ".mp4") return "video/mp4";
+    if (extension == ".webm") return "video/webm";
     return "application/octet-stream";
 }
 
@@ -498,19 +633,45 @@ char16_t utf8_first_code_unit(const char* text) {
         return 0;
     }
 
-    int length = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-    if (length <= 1) {
-        return static_cast<unsigned char>(text[0]);
+    const unsigned char first = static_cast<unsigned char>(text[0]);
+    if (first < 0x80) {
+        return static_cast<char16_t>(first);
     }
 
-    std::wstring wide(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text, -1, wide.data(), length);
-    return static_cast<char16_t>(wide[0]);
+    uint32_t codePoint = 0;
+    int extraBytes = 0;
+    if ((first & 0xE0) == 0xC0) {
+        codePoint = first & 0x1F;
+        extraBytes = 1;
+    } else if ((first & 0xF0) == 0xE0) {
+        codePoint = first & 0x0F;
+        extraBytes = 2;
+    } else if ((first & 0xF8) == 0xF0) {
+        codePoint = first & 0x07;
+        extraBytes = 3;
+    } else {
+        return static_cast<char16_t>(first);
+    }
+
+    for (int i = 0; i < extraBytes; ++i) {
+        const unsigned char next = static_cast<unsigned char>(text[i + 1]);
+        if ((next & 0xC0) != 0x80) {
+            return static_cast<char16_t>(first);
+        }
+        codePoint = (codePoint << 6) | static_cast<uint32_t>(next & 0x3F);
+    }
+
+    if (codePoint <= 0xFFFF) {
+        return static_cast<char16_t>(codePoint);
+    }
+
+    codePoint -= 0x10000;
+    return static_cast<char16_t>(0xD800 + ((codePoint >> 10) & 0x3FF));
 }
 
 enum class MarshaledValueType {
     Null = 0,
-    Bool = 1,
+    Boolean = 1,
     Int = 2,
     Double = 3,
     String = 4,
@@ -547,7 +708,7 @@ std::string encode_marshaled_arguments(CefRefPtr<CefListValue> arguments) {
             case MarshaledValueType::Null:
                 append_marshaled_segment(encoded, 'z', std::string());
                 break;
-            case MarshaledValueType::Bool:
+            case MarshaledValueType::Boolean:
                 append_marshaled_segment(encoded, 'b', arg->GetBool(1) ? "1" : "0");
                 break;
             case MarshaledValueType::Int:
@@ -590,7 +751,7 @@ public:
 
         std::error_code ec;
         if (std::filesystem::is_directory(resolvedPath, ec)) {
-            resolvedPath /= L"index.html";
+            resolvedPath /= "index.html";
         }
 
         if (ec || !std::filesystem::exists(resolvedPath) || !std::filesystem::is_regular_file(resolvedPath)) {
@@ -616,8 +777,16 @@ public:
 
     void OnBeforeCommandLineProcessing(const CefString& process_type,
                                        CefRefPtr<CefCommandLine> command_line) override {
-        if (command_line != nullptr && !command_line->HasSwitch("autoplay-policy")) {
-            command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
+        if (command_line != nullptr) {
+#if defined(__linux__)
+            command_line->RemoveSwitch("enable-crash-reporter");
+            if (!command_line->HasSwitch("disable-crash-reporter")) {
+                command_line->AppendSwitch("disable-crash-reporter");
+            }
+#endif
+            if (!command_line->HasSwitch("autoplay-policy")) {
+                command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
+            }
         }
 
         append_init_trace(
@@ -1540,11 +1709,11 @@ int32_t backend_init(const BrowserBackendApiCallbacks* callbacks) {
 
     std::filesystem::path executableDirectory = get_executable_directory();
     std::filesystem::path runtimeDirectory = get_cef_runtime_directory(executableDirectory);
-    std::filesystem::path subprocessPath = runtimeDirectory / L"browser_subprocess.exe";
-    DWORD processId = GetCurrentProcessId();
+    std::filesystem::path subprocessPath = runtimeDirectory / kBrowserSubprocessName;
+    BrowserProcessId processId = get_current_process_id();
     std::filesystem::path tracePath = get_browser_init_trace_path(executableDirectory, processId);
     std::filesystem::path resourcesPath = runtimeDirectory;
-    std::filesystem::path localesPath = runtimeDirectory / L"locales";
+    std::filesystem::path localesPath = runtimeDirectory / kBrowserLocalesDirName;
     std::filesystem::path cacheRootPath = get_browser_cache_root_path(executableDirectory);
     std::filesystem::path cachePath = get_browser_cache_path(executableDirectory, processId);
     std::filesystem::path logPath = get_browser_log_path(executableDirectory, processId);
@@ -1555,21 +1724,31 @@ int32_t backend_init(const BrowserBackendApiCallbacks* callbacks) {
     std::filesystem::create_directories(cacheRootPath, cacheError);
     std::filesystem::create_directories(cachePath, cacheError);
 
+#if defined(_WIN32)
     HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     gState.comInitialized = (comResult == S_OK || comResult == S_FALSE);
 
     CefMainArgs mainArgs(GetModuleHandleW(nullptr));
+#else
+    XSetErrorHandler(browser_x11_error_handler);
+    XSetIOErrorHandler(browser_x11_io_error_handler);
+    capture_main_args(gState.mainArgStorage, gState.mainArgv);
+
+    CefMainArgs mainArgs(
+        static_cast<int>(gState.mainArgv.empty() ? 0 : gState.mainArgv.size() - 1),
+        gState.mainArgv.empty() ? nullptr : gState.mainArgv.data());
+#endif
     CefSettings settings = {};
     settings.no_sandbox = true;
     settings.external_message_pump = true;
     settings.windowless_rendering_enabled = true;
     settings.command_line_args_disabled = false;
-    CefString(&settings.browser_subprocess_path).FromWString(subprocessPath.wstring());
-    CefString(&settings.resources_dir_path).FromWString(resourcesPath.wstring());
-    CefString(&settings.locales_dir_path).FromWString(localesPath.wstring());
-    CefString(&settings.root_cache_path).FromWString(cachePath.wstring());
-    CefString(&settings.cache_path).FromWString(cachePath.wstring());
-    CefString(&settings.log_file).FromWString(logPath.wstring());
+    set_cef_path(&settings.browser_subprocess_path, subprocessPath);
+    set_cef_path(&settings.resources_dir_path, resourcesPath);
+    set_cef_path(&settings.locales_dir_path, localesPath);
+    set_cef_path(&settings.root_cache_path, cachePath);
+    set_cef_path(&settings.cache_path, cachePath);
+    set_cef_path(&settings.log_file, logPath);
     CefString(&settings.locale).FromASCII("en-US");
     settings.log_severity = LOGSEVERITY_DEFAULT;
 
@@ -1578,10 +1757,12 @@ int32_t backend_init(const BrowserBackendApiCallbacks* callbacks) {
     append_init_trace(tracePath, "backend_init: CefExecuteProcess=%d", executeProcessResult);
     if (executeProcessResult >= 0) {
         gState.app = nullptr;
+#if defined(_WIN32)
         if (gState.comInitialized) {
             CoUninitialize();
             gState.comInitialized = false;
         }
+#endif
         return 0;
     }
     gState.cefInitialized = CefInitialize(mainArgs, settings, gState.app, nullptr);
@@ -1596,10 +1777,12 @@ int32_t backend_init(const BrowserBackendApiCallbacks* callbacks) {
 
     if (!gState.cefInitialized) {
         gState.app = nullptr;
+#if defined(_WIN32)
         if (gState.comInitialized) {
             CoUninitialize();
             gState.comInitialized = false;
         }
+#endif
     }
 
     return gState.cefInitialized ? 1 : 0;
@@ -1620,7 +1803,7 @@ void backend_shutdown(void) {
     if (gState.cefInitialized) {
         for (int i = 0; i < 200 && gState.openBrowsers > 0; ++i) {
             CefDoMessageLoopWork();
-            Sleep(10);
+            sleep_millis(10);
         }
         CefClearSchemeHandlerFactories();
         CefShutdown();
@@ -1634,10 +1817,16 @@ void backend_shutdown(void) {
     gState.shuttingDown = false;
     gState.openBrowsers = 0;
     gState.cachePath.clear();
+#if defined(__linux__)
+    gState.mainArgStorage.clear();
+    gState.mainArgv.clear();
+#endif
+#if defined(_WIN32)
     if (gState.comInitialized) {
         CoUninitialize();
         gState.comInitialized = false;
     }
+#endif
 }
 
 int32_t backend_available(void) {
@@ -1651,7 +1840,7 @@ void* backend_create(BrowserBackendApiSurface* surface, const BrowserBackendApiC
     }
 
     CefWindowInfo windowInfo;
-    windowInfo.SetAsWindowless(nullptr);
+    windowInfo.SetAsWindowless(kNullWindowHandle);
 
     CefBrowserSettings settings = {};
     settings.windowless_frame_rate = 60;
@@ -1694,7 +1883,7 @@ void backend_destroy(void* browser) {
         if (gState.cefInitialized) {
             for (int i = 0; i < 200 && !session->IsClosed(); ++i) {
                 CefDoMessageLoopWork();
-                Sleep(10);
+                sleep_millis(10);
             }
         }
         handle->session = nullptr;
@@ -1800,7 +1989,7 @@ const BrowserBackendApi gApiImpl = {
 
 } // namespace
 
-extern "C" __declspec(dllexport) const BrowserBackendApi* browser_backend_get_api(uint32_t apiVersion) {
+extern "C" BROWSER_BACKEND_EXPORT const BrowserBackendApi* browser_backend_get_api(uint32_t apiVersion) {
     if (apiVersion != BROWSER_BACKEND_API_VERSION) {
         return nullptr;
     }

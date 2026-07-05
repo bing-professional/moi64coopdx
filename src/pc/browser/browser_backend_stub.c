@@ -1,4 +1,4 @@
-#if !defined(_WIN32) || !defined(ENABLE_BROWSER) || !ENABLE_BROWSER
+#if !defined(ENABLE_BROWSER) || !ENABLE_BROWSER || (!defined(_WIN32) && !defined(__linux__))
 
 #include "browser_backend.h"
 

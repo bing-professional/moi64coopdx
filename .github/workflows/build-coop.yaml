@@ -10,6 +10,8 @@ jobs:
     build-linux:
         if: ${{ (github.event_name != 'push' || contains(github.event.head_commit.message, '[build]')) && github.event.pull_request.draft == false }}
         runs-on: ubuntu-22.04
+        env:
+            CEF_LINUX_SDK_URL: https://cef-builds.spotifycdn.com/cef_binary_149.0.6%2Bg0d0eeb6%2Bchromium-149.0.7827.201_linux64_minimal.tar.bz2
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
@@ -17,10 +19,31 @@ jobs:
             - name: Install dependencies
               run: |
                 sudo apt update
-                sudo apt install -y build-essential git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev zip
+                sudo apt install -y build-essential cmake ninja-build git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev libx11-dev zip
+
+            - name: Download staged CEF SDK
+              run: |
+                cef_root="$GITHUB_WORKSPACE/lib/cef/linux64"
+                archive_path="$RUNNER_TEMP/cef_linux64_minimal.tar.bz2"
+                extract_dir="$RUNNER_TEMP/cef_linux64_minimal_extract"
+                rm -rf "$cef_root" "$extract_dir"
+                mkdir -p "$extract_dir"
+                curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --output "$archive_path" "$CEF_LINUX_SDK_URL"
+                tar -xjf "$archive_path" -C "$extract_dir"
+                cef_sdk_dir="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+                test -n "$cef_sdk_dir"
+                mv "$cef_sdk_dir" "$cef_root"
+                test -f "$cef_root/include/cef_app.h"
+                rm -f "$archive_path"
+                rm -rf "$extract_dir"
+
+            - name: Build browser bridge
+              run: |
+                cmake -S tools/browser_backend_cef -B build/browser_backend_cef -G Ninja -DCMAKE_BUILD_TYPE=Release
+                cmake --build build/browser_backend_cef
 
             - name: Build the game
-              run: make -j$(nproc) SERVER_IP="$COOP_SERVER_IP"
+              run: make -j$(nproc) ENABLE_BROWSER=1 SERVER_IP="$COOP_SERVER_IP"
 
             - name: Generate hash
               run: |
@@ -31,7 +54,7 @@ jobs:
             - name: Zip the game
               run: |
                 cd ./build/us_pc
-                zip -r sm64coopdx_Linux.zip dynos lang mods palettes libdiscord_game_sdk.so sm64coopdx
+                zip -r sm64coopdx_Linux.zip cef_resources dynos lang mods palettes libdiscord_game_sdk.so sm64coopdx
 
             - name: Upload artifact
               uses: actions/upload-artifact@v4
@@ -42,6 +65,8 @@ jobs:
     build-steamos:
         if: ${{ (github.event_name != 'push' || contains(github.event.head_commit.message, '[build]')) && github.event.pull_request.draft == false }}
         runs-on: ubuntu-22.04
+        env:
+            CEF_LINUX_SDK_URL: https://cef-builds.spotifycdn.com/cef_binary_149.0.6%2Bg0d0eeb6%2Bchromium-149.0.7827.201_linux64_minimal.tar.bz2
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
@@ -49,10 +74,31 @@ jobs:
             - name: Install dependencies
               run: |
                 sudo apt update
-                sudo apt install -y build-essential git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev zip
+                sudo apt install -y build-essential cmake ninja-build git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev libx11-dev zip
+
+            - name: Download staged CEF SDK
+              run: |
+                cef_root="$GITHUB_WORKSPACE/lib/cef/linux64"
+                archive_path="$RUNNER_TEMP/cef_linux64_minimal.tar.bz2"
+                extract_dir="$RUNNER_TEMP/cef_linux64_minimal_extract"
+                rm -rf "$cef_root" "$extract_dir"
+                mkdir -p "$extract_dir"
+                curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --output "$archive_path" "$CEF_LINUX_SDK_URL"
+                tar -xjf "$archive_path" -C "$extract_dir"
+                cef_sdk_dir="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+                test -n "$cef_sdk_dir"
+                mv "$cef_sdk_dir" "$cef_root"
+                test -f "$cef_root/include/cef_app.h"
+                rm -f "$archive_path"
+                rm -rf "$extract_dir"
+
+            - name: Build browser bridge
+              run: |
+                cmake -S tools/browser_backend_cef -B build/browser_backend_cef -G Ninja -DCMAKE_BUILD_TYPE=Release
+                cmake --build build/browser_backend_cef
 
             - name: Build the game
-              run: make -j$(nproc) HANDHELD=1 SERVER_IP="$COOP_SERVER_IP"
+              run: make -j$(nproc) ENABLE_BROWSER=1 HANDHELD=1 SERVER_IP="$COOP_SERVER_IP"
 
             - name: Generate hash
               run: |
@@ -63,7 +109,7 @@ jobs:
             - name: Zip the game
               run: |
                 cd ./build/us_pc
-                zip -r sm64coopdx_SteamOS.zip dynos lang mods palettes libdiscord_game_sdk.so sm64coopdx
+                zip -r sm64coopdx_SteamOS.zip cef_resources dynos lang mods palettes libdiscord_game_sdk.so sm64coopdx
 
             - name: Upload artifact
               uses: actions/upload-artifact@v4

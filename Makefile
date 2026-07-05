@@ -557,6 +557,8 @@ GODDARD_O_FILES := $(foreach file,$(GODDARD_C_FILES),$(BUILD_DIR)/$(file:.c=.o))
 RPC_LIBS :=
 DISCORD_SDK_LIBS :=
 CEF_BUILD_FILES :=
+CEF_RUNTIME_SRC_FILES :=
+CEF_RUNTIME_BUILD_FILES :=
 
 ifeq ($(DISCORD_SDK), 1)
   ifeq ($(WINDOWS_BUILD),1)
@@ -580,11 +582,17 @@ ifeq ($(DISCORD_SDK), 1)
   endif
 endif
 
-CEF_ROOT := lib/cef/win64
+CEF_ROOT :=
+ifeq ($(WINDOWS_BUILD),1)
+  CEF_ROOT := lib/cef/win64
+else ifeq ($(HOST_OS),Linux)
+  CEF_ROOT := lib/cef/linux64
+endif
 CEF_BRIDGE_DIR := $(CEF_ROOT)/bridge
 CEF_RESOURCES_DIR := $(CEF_ROOT)/Resources
 CEF_RUNTIME_DIR := tools/browser_backend_cef/runtime
 CEF_INSTALL_DIR := $(BUILD_DIR)/cef_resources
+CEF_LINUX_CRASHPAD_DISABLED_STAMP :=
 CEF_BINARY_CONFIG := Release
 ifeq ($(DEBUG_BROWSER),1)
   CEF_BINARY_CONFIG := Debug
@@ -599,18 +607,38 @@ ifeq ($(ENABLE_BROWSER),1)
       CEF_LOCALE_SRC_FILES := $(wildcard $(CEF_RESOURCES_DIR)/locales/*)
       CEF_BRIDGE_SRC_FILES := $(wildcard $(CEF_BRIDGE_DIR)/browser_backend_cef.dll $(CEF_BRIDGE_DIR)/browser_subprocess.dll)
       CEF_RUNTIME_SRC_FILES := $(wildcard $(CEF_RUNTIME_DIR)/crash_reporter.cfg)
-      CEF_SUBPROCESS_BOOTSTRAP_SRC_FILES := $(wildcard $(CEF_BINARY_DIR)/bootstrap.exe)
+      CEF_SUBPROCESS_SRC_FILES := $(wildcard $(CEF_BINARY_DIR)/bootstrap.exe)
 
       CEF_BINARY_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BINARY_SRC_FILES))
       CEF_RESOURCE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RESOURCE_SRC_FILES))
       CEF_LOCALE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/locales/%,$(CEF_INSTALL_DIR)/locales/%,$(CEF_LOCALE_SRC_FILES))
       CEF_BRIDGE_BUILD_FILES := $(patsubst $(CEF_BRIDGE_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BRIDGE_SRC_FILES))
       CEF_RUNTIME_BUILD_FILES := $(patsubst $(CEF_RUNTIME_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RUNTIME_SRC_FILES))
-      CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/bootstrap.exe,$(CEF_INSTALL_DIR)/browser_subprocess.exe,$(CEF_SUBPROCESS_BOOTSTRAP_SRC_FILES))
+      CEF_SUBPROCESS_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/bootstrap.exe,$(CEF_INSTALL_DIR)/browser_subprocess.exe,$(CEF_SUBPROCESS_SRC_FILES))
 
-      CEF_BUILD_FILES := $(CEF_BINARY_BUILD_FILES) $(CEF_RESOURCE_BUILD_FILES) $(CEF_LOCALE_BUILD_FILES) $(CEF_BRIDGE_BUILD_FILES) $(CEF_RUNTIME_BUILD_FILES) $(CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES)
+      CEF_BUILD_FILES := $(CEF_BINARY_BUILD_FILES) $(CEF_RESOURCE_BUILD_FILES) $(CEF_LOCALE_BUILD_FILES) $(CEF_BRIDGE_BUILD_FILES) $(CEF_RUNTIME_BUILD_FILES) $(CEF_SUBPROCESS_BUILD_FILES)
     else
       $(warning ENABLE_BROWSER currently expects the Windows x64 CEF SDK under $(CEF_ROOT))
+    endif
+  else ifeq ($(HOST_OS),Linux)
+    ifeq ($(machine),x86_64)
+      CEF_LINUX_CRASHPAD_DISABLED_STAMP := $(CEF_INSTALL_DIR)/.linux_crashpad_disabled
+      CEF_BINARY_SRC_FILES := $(wildcard $(CEF_BINARY_DIR)/*)
+      CEF_RESOURCE_SRC_FILES := $(filter-out $(CEF_RESOURCES_DIR)/locales,$(wildcard $(CEF_RESOURCES_DIR)/*))
+      CEF_LOCALE_SRC_FILES := $(wildcard $(CEF_RESOURCES_DIR)/locales/*)
+      CEF_BRIDGE_SRC_FILES := $(wildcard $(CEF_BRIDGE_DIR)/browser_backend_cef.so)
+      CEF_SUBPROCESS_SRC_FILES := $(wildcard $(CEF_BRIDGE_DIR)/browser_subprocess)
+
+      CEF_BINARY_BUILD_FILES := $(patsubst $(CEF_BINARY_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BINARY_SRC_FILES))
+      CEF_RESOURCE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RESOURCE_SRC_FILES))
+      CEF_LOCALE_BUILD_FILES := $(patsubst $(CEF_RESOURCES_DIR)/locales/%,$(CEF_INSTALL_DIR)/locales/%,$(CEF_LOCALE_SRC_FILES))
+      CEF_BRIDGE_BUILD_FILES := $(patsubst $(CEF_BRIDGE_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_BRIDGE_SRC_FILES))
+      CEF_RUNTIME_BUILD_FILES := $(patsubst $(CEF_RUNTIME_DIR)/%,$(CEF_INSTALL_DIR)/%,$(CEF_RUNTIME_SRC_FILES))
+      CEF_SUBPROCESS_BUILD_FILES := $(patsubst $(CEF_BRIDGE_DIR)/browser_subprocess,$(CEF_INSTALL_DIR)/browser_subprocess,$(CEF_SUBPROCESS_SRC_FILES))
+
+      CEF_BUILD_FILES := $(CEF_BINARY_BUILD_FILES) $(CEF_RESOURCE_BUILD_FILES) $(CEF_LOCALE_BUILD_FILES) $(CEF_BRIDGE_BUILD_FILES) $(CEF_RUNTIME_BUILD_FILES) $(CEF_SUBPROCESS_BUILD_FILES)
+    else
+      $(warning ENABLE_BROWSER currently expects the Linux x64 CEF SDK under $(CEF_ROOT))
     endif
   endif
 endif
@@ -1218,7 +1246,7 @@ $(CEF_BRIDGE_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_BRIDGE_DIR)/%
 	@mkdir -p $(dir $@)
 	@$(CP) -f $< $@
 
-$(CEF_SUBPROCESS_BOOTSTRAP_BUILD_FILES): $(CEF_BINARY_DIR)/bootstrap.exe
+$(CEF_SUBPROCESS_BUILD_FILES): $(CEF_SUBPROCESS_SRC_FILES)
 	@mkdir -p $(dir $@)
 	@$(CP) -f $< $@
 
@@ -1233,6 +1261,13 @@ $(CEF_RESOURCE_BUILD_FILES): $(CEF_INSTALL_DIR)/%: $(CEF_RESOURCES_DIR)/%
 $(CEF_LOCALE_BUILD_FILES): $(CEF_INSTALL_DIR)/locales/%: $(CEF_RESOURCES_DIR)/locales/%
 	@mkdir -p $(dir $@)
 	@$(CP) -f $< $@
+
+ifneq ($(strip $(CEF_LINUX_CRASHPAD_DISABLED_STAMP)),)
+$(CEF_LINUX_CRASHPAD_DISABLED_STAMP): $(wildcard $(CEF_INSTALL_DIR)/crash_reporter.cfg)
+	@mkdir -p $(dir $@)
+	@$(RM) -f $(CEF_INSTALL_DIR)/crash_reporter.cfg
+	@touch $@
+endif
 endif
 
 $(BUILD_DIR)/$(COOPNET_LIBS):
@@ -1592,6 +1627,9 @@ else
   $(EXE): $(O_FILES) $(MIO0_FILES:.mio0=.o) $(ULTRA_O_FILES) $(GODDARD_O_FILES) $(BUILD_DIR)/$(RPC_LIBS) $(BUILD_DIR)/$(DISCORD_SDK_LIBS) $(BUILD_DIR)/$(COOPNET_LIBS) $(BUILD_DIR)/$(UPDATER_EXEC) $(BUILD_DIR)/$(LANG_DIR) $(BUILD_DIR)/$(MOD_DIR) $(BUILD_DIR)/$(PALETTES_DIR) $(CEF_BUILD_FILES)
 	@$(PRINT) "$(GREEN)Linking executable: $(BLUE)$@ $(NO_COL)\n"
 	$(V)$(LD) $(PROF_FLAGS) -L $(BUILD_DIR) -o $@ $(O_FILES) $(ULTRA_O_FILES) $(GODDARD_O_FILES) $(LDFLAGS)
+ifneq ($(strip $(CEF_LINUX_CRASHPAD_DISABLED_STAMP)),)
+  $(EXE): | $(CEF_LINUX_CRASHPAD_DISABLED_STAMP)
+endif
 endif
 
 .PHONY: all clean distclean default diff test load libultra res

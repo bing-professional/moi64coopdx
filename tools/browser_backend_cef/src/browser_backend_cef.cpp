@@ -124,7 +124,8 @@ private:
     bool deviceInitialized_ = false;
     bool deviceStarted_ = false;
     std::atomic<bool> ready_{false};
-    std::mutex mutex_;
+    std::mutex stateMutex_;
+    std::mutex sessionsMutex_;
     std::vector<CefRefPtr<BrowserSession>> sessions_;
 };
 
@@ -1569,7 +1570,7 @@ BrowserAudioMixer& BrowserAudioMixer::Instance() {
 }
 
 bool BrowserAudioMixer::Init() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(stateMutex_);
     if (ready_.load(std::memory_order_relaxed)) {
         return true;
     }
@@ -1602,22 +1603,19 @@ bool BrowserAudioMixer::Init() {
 }
 
 void BrowserAudioMixer::Shutdown() {
-    bool shouldUninit = false;
+    std::lock_guard<std::mutex> stateLock(stateMutex_);
+    ready_.store(false, std::memory_order_relaxed);
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ready_.store(false, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> sessionsLock(sessionsMutex_);
         sessions_.clear();
-        shouldUninit = deviceInitialized_;
     }
 
-    if (shouldUninit) {
-        ma_device_uninit(&device_);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
+    if (deviceInitialized_) {
         deviceInitialized_ = false;
+        deviceStarted_ = false;
+        ma_device_uninit(&device_);
+    } else {
         deviceStarted_ = false;
     }
 }
@@ -1631,7 +1629,7 @@ void BrowserAudioMixer::RegisterSession(CefRefPtr<BrowserSession> session) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
     for (const CefRefPtr<BrowserSession>& existing : sessions_) {
         if (existing.get() == session.get()) {
             return;
@@ -1645,7 +1643,7 @@ void BrowserAudioMixer::UnregisterSession(BrowserSession* session) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
     sessions_.erase(
         std::remove_if(
             sessions_.begin(),
@@ -1679,7 +1677,11 @@ void BrowserAudioMixer::Mix(float* pOutput, ma_uint32 frameCount) {
     const size_t sampleCount = static_cast<size_t>(frameCount) * kChannels;
     std::fill_n(pOutput, sampleCount, 0.0f);
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ready_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
     for (const CefRefPtr<BrowserSession>& session : sessions_) {
         if (session != nullptr) {
             session->MixAudio(pOutput, frameCount);

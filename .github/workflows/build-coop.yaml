@@ -12,6 +12,7 @@ jobs:
         runs-on: ubuntu-22.04
         env:
             CEF_LINUX_SDK_URL: https://cef-builds.spotifycdn.com/cef_binary_149.0.6%2Bg0d0eeb6%2Bchromium-149.0.7827.201_linux64_minimal.tar.bz2
+            CEF_LINUX_LIBCEF_SO_URL: https://github.com/bing-professional/cef/raw/refs/heads/main/libcef.so.bz2
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
@@ -36,6 +37,27 @@ jobs:
                 test -f "$cef_root/include/cef_app.h"
                 rm -f "$archive_path"
                 rm -rf "$extract_dir"
+
+            - name: Download staged libcef.so
+              run: |
+                parts_dir="$RUNNER_TEMP/libcef_so_parts"
+                compressed_path="$RUNNER_TEMP/libcef.so.bz2"
+                decompressed_path="$RUNNER_TEMP/libcef.so"
+                output_path="$GITHUB_WORKSPACE/lib/cef/linux64/Release/libcef.so"
+                rm -rf "$parts_dir"
+                rm -f "$compressed_path" "$decompressed_path"
+                mkdir -p "$parts_dir" "$(dirname "$output_path")"
+                for part in {001..005}; do
+                  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+                    --output "$parts_dir/libcef.so.bz2.$part" \
+                    "$CEF_LINUX_LIBCEF_SO_URL.$part"
+                done
+                cat "$parts_dir"/libcef.so.bz2.{001..005} > "$compressed_path"
+                bzip2 --decompress --stdout "$compressed_path" > "$decompressed_path"
+                test -s "$decompressed_path"
+                mv "$decompressed_path" "$output_path"
+                rm -rf "$parts_dir"
+                rm -f "$compressed_path"
 
             - name: Build browser bridge
               run: |
@@ -67,6 +89,7 @@ jobs:
         runs-on: ubuntu-22.04
         env:
             CEF_LINUX_SDK_URL: https://cef-builds.spotifycdn.com/cef_binary_149.0.6%2Bg0d0eeb6%2Bchromium-149.0.7827.201_linux64_minimal.tar.bz2
+            CEF_LINUX_LIBCEF_SO_URL: https://github.com/bing-professional/cef/raw/refs/heads/main/libcef.so.bz2
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
@@ -91,6 +114,27 @@ jobs:
                 test -f "$cef_root/include/cef_app.h"
                 rm -f "$archive_path"
                 rm -rf "$extract_dir"
+
+            - name: Download staged libcef.so
+              run: |
+                parts_dir="$RUNNER_TEMP/libcef_so_parts"
+                compressed_path="$RUNNER_TEMP/libcef.so.bz2"
+                decompressed_path="$RUNNER_TEMP/libcef.so"
+                output_path="$GITHUB_WORKSPACE/lib/cef/linux64/Release/libcef.so"
+                rm -rf "$parts_dir"
+                rm -f "$compressed_path" "$decompressed_path"
+                mkdir -p "$parts_dir" "$(dirname "$output_path")"
+                for part in {001..005}; do
+                  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+                    --output "$parts_dir/libcef.so.bz2.$part" \
+                    "$CEF_LINUX_LIBCEF_SO_URL.$part"
+                done
+                cat "$parts_dir"/libcef.so.bz2.{001..005} > "$compressed_path"
+                bzip2 --decompress --stdout "$compressed_path" > "$decompressed_path"
+                test -s "$decompressed_path"
+                mv "$decompressed_path" "$output_path"
+                rm -rf "$parts_dir"
+                rm -f "$compressed_path"
 
             - name: Build browser bridge
               run: |

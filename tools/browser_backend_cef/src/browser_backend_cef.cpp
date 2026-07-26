@@ -784,6 +784,20 @@ public:
             if (!command_line->HasSwitch("disable-crash-reporter")) {
                 command_line->AppendSwitch("disable-crash-reporter");
             }
+            
+            if (!command_line->HasSwitch("disable-vulkan")) {
+                command_line->AppendSwitch("disable-vulkan");
+            }
+            
+            if (!command_line->HasSwitch("disable-features")) {
+                command_line->AppendSwitchWithValue("disable-features", "OptimizationGuideOnDeviceModel");
+            } else {
+                std::string disabledFeatures = cef_to_utf8(command_line->GetSwitchValue("disable-features"));
+                if (disabledFeatures.find("OptimizationGuideOnDeviceModel") == std::string::npos) {
+                    disabledFeatures += ",OptimizationGuideOnDeviceModel";
+                    command_line->AppendSwitchWithValue("disable-features", disabledFeatures);
+                }
+            }
 #endif
             if (!command_line->HasSwitch("autoplay-policy")) {
                 command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
